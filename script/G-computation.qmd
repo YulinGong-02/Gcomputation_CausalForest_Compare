@@ -1,0 +1,1396 @@
+---
+title: "4.21_G_computation_simulation_glinternet"
+Author: "Yulin Gong"
+format:
+  html:
+    theme: cosmo
+    embed-resources: true
+    number-sections: false
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    code-fold: false
+---
+
+# Load packages and functions
+```{r}
+
+
+
+if (!require("pacman")){
+  install.packages("pacman", repos = 'http://cran.us.r-project.org')
+}
+
+pacman::p_load("glmnet",
+               "tidyverse",
+               "rio",
+               "magrittr",
+               "broom",
+               "labelled",
+               "Hmisc",
+               "flextable",
+               "gtsummary",
+               "emmeans",
+               "here",
+               "cleaR",
+               "fastDummies",
+               "formattable",
+               "furrr",
+               "future",
+               "glue")
+```
+
+
+
+```{r}
+cleaR::clear()
+{
+  
+    rmulti = function(prob, n) {
+    as.numeric(rMultinom(probs=matrix(prob, 1, length(prob)), m=n))
+  }
+  
+  expit <- function(linearcombination){
+    n = (1/(1 + exp(-(linearcombination))))
+    return (n)
+  }
+  
+  logit <- function(pr){
+    n = log(pr/(1-pr))
+    return(n)
+  }
+  
+round_df <- function(df, digits) {
+  nums <- vapply(df, is.numeric, FUN.VALUE = logical(1))
+  
+  df[,nums] <- round(df[,nums], digits = digits)
+  (df)
+}
+
+diff_fct <- function(x){
+  dif <- x - lag(x)
+  return(dif)
+}
+
+
+p_load("rlang")
+recreate_var <- function(datau, var_name) {
+  
+  vars <- strsplit(var_name, "__")[[1]]
+  
+  expr <- rlang::parse_expr(paste(vars, collapse = " * "))
+  
+  datau %>% mutate("{var_name}" := !!expr)
+}
+
+geom_hist_percent <- function(.data, .var) {
+  .data %>%
+    ggplot(aes(x = !!sym(.var))) +
+    geom_histogram(aes(y = after_stat(count/sum(count)))) +
+    ylab("Percent") +
+    scale_y_continuous(labels = scales::percent) +
+    theme_bw()
+}
+}
+```
+
+# GENERALIZED HTE APPROACH (SIMULATED DATA, 10,000 A1)
+## Data generating mechanism for simulation
+
+```{r}
+
+n=10000
+set.seed(123)
+
+data_grf <- tibble(
+  age   = rnorm(n, mean=68, sd=10), 
+  black = rbinom(n, size=1, prob=0.3), 
+  sbp   = rnorm(n, mean=140, sd=15), 
+  dbp   = rnorm(n, mean=78, sd=12), 
+  scr   = rnorm(n, mean=1.07, sd=0.34), 
+  egfr  = rnorm(n, mean=72, sd=20), 
+  egfr_ge72 = as.numeric(egfr>=72),
+  statin=rbinom(n, size=1, prob=0.43), 
+  aspirin=rbinom(n, size=1, prob=0.51), 
+  fram  = rnorm(n, mean=25, sd=12), 
+  smok  = factor(rmulti(prob=c(0.44, 0.42, 0.14), n))) %>% 
+  dummy_cols("smok", remove_selected_columns = F,
+             remove_first_dummy = T) %>% 
+  mutate(
+    tx = rbinom(n, size=1, prob=expit(logit(0.01) + 
+                                        log(0.90)*statin+
+                                        log(1.01)*sbp+
+                                        log(1.01)*dbp+
+                                        log(1.01)*age+
+                                        log(1.03)*fram+
+                                        log(1.1)*black+
+                                        log(1.1)*scr+
+                                        log(1.1)*smok_3 +
+                                        log(1.05)*smok_2)),
+    
+    y = rbinom(n, size=1, prob=expit(logit(0.01) + 
+                                       log(0.038)*tx + 
+                                       log(0.592)*egfr_ge72 +
+                                       log(0.453)*aspirin +
+                                       log(12.00)*tx*egfr_ge72 + 
+                                       log(34.70)*tx*aspirin +
+                                       log(0.543)*egfr_ge72*aspirin + 
+                                       log(0.372)*tx*egfr_ge72*aspirin +
+                                       
+                                       log(0.90)*statin+
+                                       log(1.01)*sbp+
+                                       log(1.01)*dbp+
+                                       log(1.01)*age+
+                                       log(1.03)*fram+
+                                       log(1.1)*black+
+                                       log(1.2)*scr+
+                                       log(1.05)*smok_3 +
+                                       log(1.05)*smok_2))) %>% 
+  set_variable_labels(egfr    = "Estimated Glomerular Filtration Rate",
+                      aspirin = "Aspirin use",
+                      statin  = "Statin use",
+                      sbp     = "Systolic blood pressure",
+                      dbp     = "Diastolic blood pressure",
+                      age     = "Age in years",
+                      fram    = "Framingham score risk",
+                      black   = "Black race",
+                      scr     = "Serum Creatinine",
+                      smok_3  = "Current smoker", #smok_1: "Smoking (never)"
+                      smok_2  = "Fomer smoker") 
+
+```
+
+```{r}
+library(gtsummary)
+library(dplyr)
+library(labelled)
+library(forcats)
+
+table1 <- data_grf %>% 
+  mutate(tx = case_when(
+    tx == 1 ~ "Treatment",
+    TRUE    ~ "Placebo"
+  )) %>%
+  mutate(`Smoking status` = as.numeric(as_factor(smok))) %>%  
+  dplyr::select(-contains("smok_"), -egfr_ge72, -smok) %>%
+  relocate(y, .after = "Smoking status") %>%
+  rename(`Y (cardiovascular events)` = y) %>%
+  set_value_labels(
+    `Smoking status` = c(
+      "Never smoker"   = 1,
+      "Former smoker"  = 2,
+      "Current smoker" = 3
+    )
+  ) %>%
+  modify_if(is.labelled, to_factor) %>%
+  tbl_summary(
+    missing = "no",
+    by = "tx",
+    digits = list(everything() ~ 0),
+    statistic = list(
+      all_continuous()  ~ "{mean} ({sd})",
+      all_categorical() ~ "{n} ({p}%)"
+    )
+  ) %>%
+  add_overall() %>%
+  add_stat_label(location = "row") %>%
+  add_difference(
+    test = list(
+      all_continuous()  ~ "smd",
+      all_categorical() ~ "smd"
+    )
+  ) %>%
+  modify_header(
+    label = "**Variable**",
+    estimate = "**SMD**"
+  ) %>%
+  modify_spanning_header(starts_with("stat_") ~ "Treatment Assignment") %>%
+  bold_labels()
+table1
+```
+
+# Step 1: select variables and data preprocessing
+```{r}
+data_grf <- data_grf %>%
+  mutate(
+    smok = factor(smok,
+                  levels = c(1, 2, 3),
+                  labels = c("Never", "Former", "Current"))
+  )
+
+dsn1 <- data_grf %>% 
+  dplyr::select(-c(egfr_ge72, smok)) # removing these variables to run the analysis as they are no longer needed
+
+exposure ="tx"
+outcome  ="y"
+
+covariates = setdiff(colnames(dsn1), c(outcome)) #include exposure here
+covariates
+```
+
+
+
+```{r}
+
+pacman::p_load("WeightIt", "cobalt", "dplyr", "glue", "tidyr", "glinternet", "rsample")
+
+# Note: train/test split is performed later after creating `dsn2`.
+
+# Step 2: Fit a flexible saturated model
+# Step 3: Apply a selection method to reduce overfitting
+
+
+
+dsn2 <- dsn1 %>%
+  mutate(
+    smok = dplyr::case_when(
+      smok_3 == 1 ~ 3L,
+      smok_2 == 1 ~ 2L,
+      TRUE        ~ 1L
+    ),
+    smok = factor(smok, levels = 1:3, labels = c("Never", "Former", "Current"))
+  ) %>%
+  select(-smok_2, -smok_3)  
+
+
+data_split <-initial_split(dsn2, 
+                           strata = "y", 
+                           prop = 0.70)
+train <- training(data_split)
+test <- testing(data_split)
+
+
+form_denom <- tx ~ age + black + sbp + dbp + scr + egfr + statin + aspirin + 
+    fram + smok
+# Estimate propensity score-based stabilized inverse probability weights (IPTW)
+# in the training set to adjust for confounding when modeling treatment effects.
+# The target estimand is the ATE
+weight_model <- weightit(
+  form_denom,
+  data = as.data.frame(train),
+  stabilize = TRUE,
+  method = "ps",
+  estimand = "ATE"
+)
+# Extract stabilized IPTW and store them in the training data
+train$sipw_en <- weight_model$weights
+```
+
+
+```{r}
+mean(train$sipw_en)
+
+bal.tab(weight_model, un = TRUE)
+love.plot(weight_model, binary = "std")
+```
+
+
+
+
+```{r}
+prep_glinternet <- function(train, test,
+                            y_col = "y",
+                            cat_cols = character(),
+                            tx_col = "tx",
+                            drop_cols = NULL) {
+  library(dplyr)
+
+  Y_train <- as.integer(train[[y_col]])
+  Y_test  <- as.integer(test[[y_col]])
+
+  if (!all(Y_train %in% c(0, 1))) stop("Y_train must be 0/1.")
+  if (!all(Y_test  %in% c(0, 1))) stop("Y_test must be 0/1.")
+
+  X_train_df <- train %>% select(-any_of(c(y_col, drop_cols)))
+  X_test_df  <- test  %>% select(-any_of(c(y_col, drop_cols)))
+
+  x_cols <- colnames(X_train_df)
+
+  if (tx_col %in% x_cols) {
+    X_train_df[[tx_col]] <- as.integer(X_train_df[[tx_col]])
+    X_test_df[[tx_col]]  <- as.integer(X_test_df[[tx_col]])
+  } else {
+    stop("tx column not found in data.")
+  }
+
+  cat_levels <- lapply(cat_cols, function(nm) {
+    if (!nm %in% x_cols) stop(paste("Categorical var not found:", nm))
+    levels(factor(X_train_df[[nm]]))
+  })
+  names(cat_levels) <- cat_cols
+
+  encode_one <- function(df) {
+    X_list <- vector("list", length(x_cols))
+    numLevels <- integer(length(x_cols))
+
+    for (j in seq_along(x_cols)) {
+      nm <- x_cols[j]
+      v  <- df[[nm]]
+
+      if (nm %in% cat_cols) {
+        v <- factor(v, levels = cat_levels[[nm]])
+
+        if (any(is.na(v))) {
+          stop(paste0(
+            "Unseen level in categorical variable '", nm,
+            "'. Fix levels BEFORE split."
+          ))
+        }
+
+        X_list[[j]] <- as.integer(v) - 1L
+        numLevels[j] <- length(cat_levels[[nm]])
+      } else {
+        X_list[[j]] <- as.numeric(v)
+        numLevels[j] <- 1L
+      }
+    }
+
+    X <- do.call(cbind, X_list)
+    colnames(X) <- x_cols
+
+    list(X = X, numLevels = numLevels)
+  }
+
+  enc_train <- encode_one(X_train_df)
+  enc_test  <- encode_one(X_test_df)
+
+  list(
+    X_train   = enc_train$X,
+    X_test    = enc_test$X,
+    Y_train   = Y_train,
+    Y_test    = Y_test,
+    numLevels = enc_train$numLevels,
+    x_cols    = x_cols
+  )
+}
+
+extract_relaxed_glinternet_terms <- function(cv_fit, x_cols, numLevels, tx_col = "tx") {
+  best_idx <- match(cv_fit$lambdaHat, cv_fit$glinternetFit$lambda)
+  if (is.na(best_idx)) {
+    stop("Could not match lambdaHat to the fitted glinternet path.")
+  }
+
+  active <- cv_fit$glinternetFit$activeSet[[best_idx]]
+
+  cont_cols <- x_cols[numLevels == 1]
+  cat_cols  <- x_cols[numLevels > 1]
+
+  cont_name <- function(idx) cont_cols[idx]
+  cat_name  <- function(idx) cat_cols[idx]
+
+  main_terms <- character()
+  int_terms  <- character()
+
+  if (!is.null(active$cont)) {
+    main_terms <- c(main_terms, vapply(as.vector(active$cont), cont_name, character(1)))
+  }
+
+  if (!is.null(active$cat)) {
+    main_terms <- c(main_terms, vapply(as.vector(active$cat), cat_name, character(1)))
+  }
+
+  if (!is.null(active$contcont)) {
+    contcont_terms <- apply(active$contcont, 1, function(idx) {
+      paste(cont_name(idx[1]), cont_name(idx[2]), sep = ":")
+    })
+    int_terms <- c(int_terms, contcont_terms)
+  }
+
+  if (!is.null(active$catcont)) {
+    catcont_terms <- apply(active$catcont, 1, function(idx) {
+      paste(cat_name(idx[1]), cont_name(idx[2]), sep = ":")
+    })
+    int_terms <- c(int_terms, catcont_terms)
+  }
+
+  if (!is.null(active$catcat)) {
+    catcat_terms <- apply(active$catcat, 1, function(idx) {
+      paste(cat_name(idx[1]), cat_name(idx[2]), sep = ":")
+    })
+    int_terms <- c(int_terms, catcat_terms)
+  }
+
+  main_terms <- unique(main_terms)
+  int_terms  <- unique(int_terms)
+
+  if (!tx_col %in% main_terms) {
+    main_terms <- c(main_terms, tx_col)
+  }
+
+  list(
+    best_idx = best_idx,
+    main_terms = unique(main_terms),
+    interaction_terms = int_terms
+  )
+}
+
+build_relaxed_formula <- function(y_col, main_terms, interaction_terms) {
+  inherited_main_terms <- unique(unlist(strsplit(interaction_terms, ":", fixed = TRUE)))
+  rhs_terms <- unique(c(main_terms, inherited_main_terms, interaction_terms))
+
+  if (length(rhs_terms) == 0) {
+    rhs_terms <- "1"
+  }
+
+  as.formula(
+    paste(y_col, "~", paste(rhs_terms, collapse = " + "))
+  )
+}
+
+clamp01 <- function(x) {
+  pmin(pmax(as.numeric(x), 0), 1)
+}
+```
+
+
+# Glinternet estimating 
+
+```{r}
+plan(multisession, workers = 6)
+pacman::p_load("glinternet", "rsample", "dplyr")
+# glinternet: fits hierarchical group-lasso models with interaction selection
+# rsample: provides tools for data splitting (train/test)
+# dplyr: data manipulation
+
+set.seed(123)
+outcome <- "y"
+# Reuse the earlier train/test split so weighting, model fitting, and
+# downstream prediction all stay aligned to the same partition.
+
+# glinternet requires categorical variables to be explicitly specified
+# so that it can correctly handle group structure and interactions
+cat_cols <- c("smok")
+
+prep <- prep_glinternet(
+  train    = train,
+  test     = test,
+  y_col    = "y",
+  cat_cols = cat_cols,
+  tx_col   = "tx",
+  drop_cols = c("sipw_en")
+)
+
+
+# Converts data into numeric design matrices (X_train, X_test)
+# Creates numLevels (required by glinternet to define group structure)
+# Separates predictors (X) and outcome (Y)
+
+# Outputs:
+# prep$X_train: predictor matrix for training
+# prep$Y_train: outcome vector for training
+# prep$X_test : predictor matrix for testing
+# prep$numLevels: number of levels for each variable (needed for group lasso)
+
+
+set.seed(123)
+fit_cv <- glinternet.cv(
+  X = prep$X_train,
+  Y = prep$Y_train,
+  numLevels = prep$numLevels,
+  family = "binomial",
+  nFolds = 10
+)
+
+
+
+
+# glinternet.cv:
+# Fits a hierarchical group-lasso model
+# Automatically selects main effects and pairwise interactions
+# Enforces hierarchy: interactions only enter if main effects are included
+# Uses cross-validation to choose optimal regularization parameter (lambda)
+
+plot(fit_cv)
+
+relaxed_terms <- extract_relaxed_glinternet_terms(
+  cv_fit = fit_cv,
+  x_cols = prep$x_cols,
+  numLevels = prep$numLevels,
+  tx_col = "tx"
+)
+
+relaxed_form <- build_relaxed_formula(
+  y_col = "y",
+  main_terms = relaxed_terms$main_terms,
+  interaction_terms = relaxed_terms$interaction_terms
+)
+
+relaxed_form
+
+# Stage 2 relaxed refit:
+# use a standard weighted logistic regression on the selected terms.
+# With continuous IPTW, glm(binomial) may print the usual
+# "non-integer #successes" warning from prior weights.
+final_model <- glm(
+  formula = relaxed_form,
+  data = train,
+  family = binomial(),
+  weights = sipw_en
+)
+
+summary(final_model)
+
+p_test <- as.numeric(
+  predict(final_model, newdata = test, type = "response")
+)
+
+p_test <- clamp01(p_test)
+
+# Observed-treatment prediction only; retained as a quick model check
+# and not used for downstream ITE estimation.
+head(p_test)
+
+
+```
+
+
+
+```{r}
+
+# Use the fitted cross-validated glinternet model
+cv_lasso <- final_model
+
+# Convert test dataset to tibble for easier manipulation
+pred_test_df <- test %>% dplyr::as_tibble()
+test0 <- pred_test_df %>% dplyr::mutate(tx = 0)
+test1 <- pred_test_df %>% dplyr::mutate(tx = 1)
+
+# Predict outcome probability under control (tx = 0)
+pred_test_df$y0 <- as.numeric(
+  predict(cv_lasso, newdata = test0, type = "response")
+)
+pred_test_df$y0 <- clamp01(pred_test_df$y0)
+
+# Predict outcome probability under treatment (tx = 1)
+pred_test_df$y1 <- as.numeric(
+  predict(cv_lasso, newdata = test1, type = "response")
+)
+pred_test_df$y1 <- clamp01(pred_test_df$y1)
+
+# Compute individual treatment effect (ITE)
+pred_test_df$ite <- pred_test_df$y1 - pred_test_df$y0
+
+
+```
+
+
+```{r}
+# estimate ite in full dataset using the original analysis dataset
+df_full_orig <- dsn2 %>% as_tibble()
+
+
+df_full <- df_full_orig %>% as_tibble()
+df_full0 <- df_full %>% dplyr::mutate(tx = 0)
+df_full1 <- df_full %>% dplyr::mutate(tx = 1)
+
+df_full$y0 <- as.numeric(
+  predict(cv_lasso, newdata = df_full0, type = "response")
+)
+df_full$y0 <- clamp01(df_full$y0)
+
+df_full$y1 <- as.numeric(
+  predict(cv_lasso, newdata = df_full1, type = "response")
+)
+df_full$y1 <- clamp01(df_full$y1)
+
+df_full$ite <- df_full$y1 - df_full$y0
+
+```
+
+
+
+
+```{r}
+
+# Use glmnet to select important variables for ITE prediction (post-hoc screening)
+library(fastDummies)
+library(dplyr)
+
+# creat dummy variables for smoking status
+smok_df <- fastDummies::dummy_cols(
+  data.frame(smok = df_full$smok),
+  select_columns = "smok",
+  remove_first_dummy = TRUE,        # drop reference
+  remove_selected_columns = TRUE
+) 
+
+smok_mat <- as.matrix(smok_df)
+
+# Build a numeric design matrix for post-hoc glmnet ITE screening.
+# Exclude observed outcome, treatment factor, and all estimated potential
+# outcome columns to avoid leakage into the screening model.
+X_full_base <- df_full %>%
+  dplyr::select(-y, -smok, -y0, -y1, -ite) %>%
+  as.matrix()
+
+X_full2 <- cbind(X_full_base, smok_mat)
+
+# ensure tx column is numeric in this design
+idx_tx_full2 <- which(colnames(X_full2) == "tx")
+if (length(idx_tx_full2) == 1) {
+  X_full2[, idx_tx_full2] <- as.numeric(X_full2[, idx_tx_full2])
+}
+
+y_ite_scaled <- as.numeric(scale(df_full$ite))
+keep <- complete.cases(X_full2) & !is.na(y_ite_scaled)
+
+X_cc <- X_full2[keep, , drop = FALSE]
+X_cc <- X_cc[, colnames(X_cc) != "smok", drop = FALSE]
+X_cc <- X_cc[, colnames(X_cc) != "tx", drop = FALSE]
+
+y_cc <- y_ite_scaled[keep]
+
+fit_ite_glmnet <- cv.glmnet(
+  x = X_cc,
+  y = y_cc,
+  family = "gaussian",
+  alpha  = 1,
+  nfolds = 10
+)
+
+
+
+
+# Extracting coefficients at the lambda that minimizes cross-validated error
+
+coef_ite <- coef(fit_ite_glmnet, s = "lambda.min")
+
+coef_df <- data.frame(
+  variable = rownames(coef_ite),
+  coefficient = as.numeric(coef_ite)
+) |>
+  dplyr::filter(variable != "(Intercept)") |>
+  dplyr::arrange(dplyr::desc(abs(coefficient)))
+coef_df <- coef_df %>%
+  dplyr::mutate(
+    coefficient = round(coefficient, 4)
+  )
+coef_df
+
+```
+
+
+# plot coeffcient
+```{r}
+library(dplyr)
+
+coef_df <- coef_df %>%
+  mutate(abs_coef = abs(coefficient))
+
+coef_df_nz <- coef_df %>%
+  dplyr::filter(abs_coef > 0)
+
+
+var_labels <- c(
+  aspirin     = "Aspirin use",
+  egfr        = "Estimated glomerular filtration rate (eGFR)",
+  fram        = "Framingham risk score",
+  sbp         = "Systolic blood pressure",
+  black       = "Black race",
+  age         = "Age in years",
+  scr         = "Serum creatinine",
+  statin      = "Statin use",
+
+  smok_Former = "Former smoker"
+  
+)
+
+
+library(ggtext)
+
+ggplot(coef_df_nz, aes(
+  x = abs_coef,
+  y = reorder(variable, abs_coef)
+)) +
+  geom_col(fill = "#377EB8") +   
+  scale_x_continuous(
+    breaks = seq(0, 2, 0.1),
+    limits = c(0, max(coef_df_nz$abs_coef))
+  ) +
+  scale_y_discrete(labels = var_labels) +
+  labs(
+    x = "Variable importance",
+    y = "Predictors",
+    title = "Variable importance based on absolute standardized coefficients"
+  ) +
+  geom_vline(xintercept = 0.2, linetype=2, linewidth=1) +
+  theme_bw(base_size = 10) +
+  theme(
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    axis.text.y  = ggtext::element_markdown(face = "bold")
+  )
+
+
+```
+
+
+```{r}
+# fit linear regression using selected variables from glmnet to 
+# get standardized coefficients for variable importance plot
+# (ite ~ covariates)
+sel_vars <- coef_df %>%
+  dplyr::filter(coefficient != 0) %>%
+  dplyr::pull(variable)
+
+
+df_X_cc <- as.data.frame(X_cc)
+
+
+df_lm <- df_X_cc %>%
+  dplyr::mutate(ite = y_cc) %>%
+  dplyr::select(ite, all_of(sel_vars))
+
+
+df_lm_scaled <- df_lm %>%
+  dplyr::mutate(
+    ite = as.numeric(scale(ite))
+  ) %>%
+  dplyr::mutate(
+    dplyr::across(
+      all_of(sel_vars),
+      ~ as.numeric(scale(.x))
+    )
+  )
+
+form_lm <- as.formula(
+  paste("ite ~", paste(sel_vars, collapse = " + "))
+)
+
+fit_lm <- lm(form_lm, data = df_lm_scaled)
+
+summary(fit_lm)
+
+
+
+```
+
+# plot lm eatimate
+```{r}
+library(broom)
+library(dplyr)
+
+imp_lm <- broom::tidy(fit_lm) %>%
+  filter(term != "(Intercept)") %>%
+  mutate(
+    estimate = as.numeric(estimate),
+    abs_est  = abs(estimate)
+  ) %>%
+  arrange(desc(abs_est))
+library(ggplot2)
+
+library(ggtext)
+
+ggplot(imp_lm, aes(
+  x = abs_est,
+  y = reorder(term, abs_est)
+)) +
+  geom_col(fill = "#377EB8") +   
+  scale_x_continuous(
+    breaks = seq(0, 1, 0.1),
+    limits = c(0, max(imp_lm$abs_est))
+  ) +
+  scale_y_discrete(labels = var_labels) +
+  labs(
+    x = "Variable importance",
+    y = "Predictors",
+    title = "Variable importance based on absolute standardized coefficients"
+  ) +
+  geom_vline(xintercept = 0.2, linetype=2, linewidth=1) +
+  theme_bw(base_size = 13) +
+  theme(
+    axis.title.x = element_text(face = "bold"),
+    axis.title.y = element_text(face = "bold"),
+    axis.text.y  = ggtext::element_markdown(face = "bold")
+  )
+
+
+```
+
+
+
+# Histogram and Ranking of Estimated ITE
+
+```{r}
+# Function to plot histogram as percentages
+geom_hist_percent <- function(.data, .var) {
+  .data %>%
+    ggplot(aes(x = !!sym(.var))) +
+    geom_histogram(aes(y = after_stat(count/sum(count)))) +
+    ylab("Percent") +
+    scale_y_continuous(labels = scales::percent) +
+    theme_bw()
+}
+
+# Histogram of ITE distribution
+pred_test_df %>%
+  geom_hist_percent("ite") +
+  labs(x="Individualized treatement effects (ITE)") 
+
+# Rank plot of ITE values
+pred_test_df %>%
+  arrange(ite) %>%
+  mutate(rank=1:n()) %>%
+  ggplot(aes(y=ite, x=rank)) +
+  geom_point() +
+  labs(y="Individualized effects (difference scale)") +
+  geom_hline(yintercept = 0, linetype=2) +
+  theme_bw()
+
+```
+
+
+# Density Plot of ITE (Percentage Scale)
+```{r}
+# Convert ITE to percentage points and plot density
+pred_test_df %>%
+  mutate(ite_pp = ite * 100) %>%
+  ggplot(aes(x = ite_pp)) +
+  geom_density(fill = "steelblue", alpha = 0.5) +
+  geom_vline(xintercept = 0, linetype = 2) +
+  labs(x = "Estimated ITE (percentage points)") +
+  theme_bw()
+
+```
+
+```{r}
+pred_test_df <- pred_test_df %>%
+  mutate(
+    smok_2 = as.integer(smok == "Former"),
+    smok_3 = as.integer(smok == "Current")
+  )%>%
+  select(-smok)
+```
+
+# Compute Probabilities and Scaled ITE
+
+```{r}
+
+
+pred_test_df$ite <- pred_test_df$y1 - pred_test_df$y0
+pred_test_df$ite_scaled <- as.numeric(scale(pred_test_df$ite
+                                          )) #--Scale for clustering
+
+
+# Add Noise and Prepare for Clustering
+set.seed(123)
+pred_test_df <-  pred_test_df %>% 
+  mutate(
+    iter = ite + rnorm(n=n(), mean=0, sd=0.1), #jittering
+    iter_scaled = as.numeric(scale(iter)))
+
+# Determine Optimal Number of Clusters
+set.seed(123)
+# Use NbClust to determine optimal number of clusters
+p_load("NbClust")
+res<-NbClust(as.data.frame(pred_test_df$iter_scaled), 
+             distance = "euclidean", 
+             min.nc=2, max.nc=15, 
+             method = "ward.D2", 
+             index = "beale", alphaBeale = 0.05)
+
+num_cluster <- as.numeric(res$Best.nc[1])
+num_cluster
+
+```
+
+```{r}
+# Assign Clusters and Update Covariates
+pred_test_df$cluster <- res$Best.partition
+covariates <- setdiff(colnames(pred_test_df), c("y", "tx"))
+covariates <- setdiff(covariates, exposure)
+covariates <- setdiff(
+  covariates,
+  c("y0", "y1", "ite", "ite_scaled", "iter", "iter_scaled", "cluster")
+)
+```
+
+```{r}
+library(ggtext)
+# Compute cluster-level means for ITE and covariates
+tr <- pred_test_df %>%
+  dplyr::select(-all_of(exposure)) %>% 
+  group_by(cluster) %>%
+  group_modify(~ {.x %>% map_dfr(mean)}) %>%
+  ungroup() %>% 
+  arrange(cluster, ite_scaled) %>% 
+  relocate(cluster, ite_scaled) %>% 
+  dplyr::select(cluster, ite, ite_scaled, all_of(covariates)) 
+
+# Select variables with meaningful differences across clusters
+varnames <- pred_test_df %>%
+  dplyr::select(-all_of(exposure)) %>% 
+  mutate_at(covariates, \(x) as.numeric(scale(x))) %>% 
+  group_by(cluster) %>%
+  group_modify(~ {.x %>% map_dfr(mean)}) %>%
+  ungroup() %>%
+  dplyr::select(cluster, all_of(covariates)) %>% 
+  mutate_all(diff_fct) %>% 
+  dplyr::select(-where(~any(is.nan(.)))) %>% 
+  drop_na() %>% 
+  dplyr::select(where(~mean(abs(.x), na.rm=T) > 0.2)) %>% 
+  dplyr::select(-cluster) %>% 
+  colnames()
+
+# Calculate variable importance based on between-cluster differences
+var_imp <- pred_test_df %>%
+  dplyr::select(-all_of(exposure)) %>% 
+  mutate_at(covariates, \(x) as.numeric(scale(x))) %>% 
+  group_by(cluster) %>%
+  group_modify(~ {.x %>% map_dfr(mean)}) %>%
+  ungroup() %>%
+  dplyr::select(all_of(covariates)) %>% 
+  mutate_all(diff_fct) %>% 
+  dplyr::select(-where(~any(is.nan(.)))) %>% 
+  mutate_all(abs) %>% 
+  drop_na() %>% 
+  pivot_longer(cols=everything(),
+               names_to = "variables",
+               values_to = "importance") %>% 
+  arrange(desc(importance))
+
+
+cb <- data.frame(labels=var_label(dsn1) %>% unlist()) %>% 
+  rownames_to_column(var="variables") %>% 
+  filter(variables %in% var_imp$variables)
+
+# Merge labels with importance results
+var_imp_labels <- var_imp %>% 
+  left_join(cb, by="variables")
+# Plot variable importance
+var_imp_plot <- var_imp_labels %>%
+  mutate(labels = str_wrap(labels, width = 10)) %>% 
+  ggplot(aes(y=reorder(labels, importance), x=importance)) +
+  geom_bar(stat= "identity") +
+  geom_vline(xintercept = 0.2, linetype=2, linewidth=1) +
+  scale_fill_brewer(palette="Set1") +
+  scale_x_continuous(breaks=seq(0,1.5,0.1)) +
+  ylab("Predictors") + 
+  xlab("Variable importance") +
+  theme_bw() +
+  theme(axis.title.x = element_text(face = "bold"),
+        axis.text.y =  ggtext::element_markdown(face = "bold"))
+
+# Create summary table of important variables by cluster
+var_imp_cut <- pred_test_df %>%
+  dplyr::select(cluster, ite, all_of(varnames)) %>% 
+  group_by(cluster) %>%
+  group_modify(~ {.x %>% map_dfr(mean)}) %>%
+  ungroup() %>%
+  arrange(cluster, ite) %>% 
+  round_df(2)
+
+
+```
+
+```{r}
+
+var_imp_cut %>% flextable()
+```
+
+```{r}
+varnames
+
+var_imp_plot
+```
+
+
+```{r}
+# Load emmeans for marginal effects
+p_load("emmeans")
+
+dsn_final <- dsn1
+covariates
+```
+# Propensity Score Weighting (IPTW)
+```{r}
+form_denom <- tx ~ age + black + sbp + dbp + scr + egfr + statin + aspirin + 
+    fram + smok_2 + smok_3
+weight_model_all <- weightit(form_denom, 
+                         data = dsn_final, 
+                         stabilize = T,
+                         method = "ps", 
+                         estimand = "ATE")
+
+# Attach weights and create ID
+dsn_final$sipw_en_all <- weight_model_all$weights
+dsn_final1 <- dsn_final %>% 
+  mutate(id=1:n())
+
+#check the weights
+mean(dsn_final$sipw_en_all)
+
+hist(dsn_final$sipw_en_all)
+
+# Covariate balance plot
+love.plot(weight_model_all, 
+          var.order = "unadjusted",
+          abs = TRUE,              
+          threshold = 0.1)   
+
+
+```
+
+# Estimate ATE Using Weighted Regression
+```{r}
+pacman::p_load("lmtest", "sandwich")
+
+# Fit weighted model (risk difference scale)
+ate_rd <- glm(y~tx, 
+              family=quasibinomial("identity"), 
+              data=dsn_final1,
+              weights = sipw_en_all)
+# Compute robust clustered standard errors
+dn_ate_rd <-coeftest(ate_rd, vcov = vcovCL(ate_rd, cluster=dsn_final1$id, type="HC1")) %>% 
+  tidy(conf.int=T) %>% 
+  filter(term=="tx") %>% 
+  dplyr::select(term,estimate,conf.low, conf.high,p.value) %>% 
+  round_df(2) 
+
+dn_ate_rd %>% 
+  flextable()
+```
+
+```{r}
+# Fit weighted model (risk ratio scale)
+ate_rr <- glm(y~tx, 
+              family=quasibinomial("log"), 
+              data=dsn_final1,
+              weights = sipw_en_all)
+
+dn_ate_rr <- coeftest(ate_rr, vcov = vcovCL(ate_rr, cluster=dsn_final1$id, type="HC1")) %>% 
+  tidy(conf.int=T) %>% 
+  filter(term=="tx") %>% 
+  mutate_at(c("estimate","conf.low", "conf.high"), exp) %>%
+  dplyr::select(term,estimate,conf.low, conf.high,p.value) %>% 
+  round_df(2)
+
+    
+dn_ate_rr %>% 
+  flextable()
+```
+
+# Conditional average treatment effect (CATE)
+```{r}
+varnames
+
+var_imp_cut
+```
+
+```{r}
+cut_egfr <- round(mean(c(var_imp_cut$egfr[1], var_imp_cut$egfr[2])),2)
+cut_egfr
+```
+
+## eGFR Risk difference
+```{r}
+dsn_final2 <- dsn_final1 %>%
+  mutate(egfr_bin = as.numeric(round(egfr>=cut_egfr)))
+
+
+### eGFR Risk difference
+model_cate_egfr_rd <- glm(y~tx*egfr_bin,
+              family=quasibinomial("identity"),
+              data=dsn_final2,
+              weights = sipw_en_all)
+
+tidy(model_cate_egfr_rd) %>% 
+  filter(term=="tx:egfr_bin") %>% 
+  select(term, `p.value`) %>% 
+  round_df(4)
+# check out the p-value for the interaction term# check out the p-value for the interaction term
+
+
+p_load("emmeans")
+cate_egfr_rd <- emmeans::emtrends(model_cate_egfr_rd, ~egfr_bin,
+                          var="tx",
+                          at = list(egfr_bin  =c(0,1)),
+                          vcov = sandwich::vcovCL(model_cate_egfr_rd,
+                                                  cluster= dsn_final2$id,
+                                                  type="HC1")) %>%
+  tidy(conf.int=T) %>%
+  round_df(2) %>%
+  flextable()
+cate_egfr_rd
+
+```
+
+```{r}
+### eGFR Risk ratio
+model_cate_egfr_rr <- glm(y~tx*egfr_bin,
+                          family=quasibinomial("log"),
+                          data=dsn_final2,
+                          weights = sipw_en_all)
+
+tidy(model_cate_egfr_rr)  %>% 
+  filter(term=="tx:egfr_bin") %>% 
+  select(term, `p.value`) %>% 
+  round_df(4)# check out the p-value for the interaction term
+
+p_load("emmeans")
+cate_egfr_rr <- emmeans::emtrends(model_cate_egfr_rr, ~egfr_bin,
+                                  var="tx",
+                                  at = list(egfr_bin  =c(0,1)),
+                                  vcov = sandwich::vcovCL(model_cate_egfr_rr,
+                                                          cluster= dsn_final2$id,
+                                                          type="HC1")) %>%
+  tidy(conf.int=T) %>%
+  mutate_at(c("tx.trend", "conf.low",  "conf.high"), exp) %>%
+  round_df(2) %>%
+  flextable()
+cate_egfr_rr
+```
+
+```{r}
+# Number count and proportion
+library(dplyr)
+library(tibble)
+
+
+N_prop_eGFR <- dsn_final2  %>%
+  filter(!is.na(y), !is.na(tx), !is.na(egfr_bin)) %>%
+  count(egfr_bin, name = "N") %>%
+  mutate(
+    Proportion = round(100 * N / sum(N), 2)
+  ) %>%
+  arrange(egfr_bin)
+
+N_prop_eGFR
+
+
+```
+
+
+
+
+## Aspirin
+```{r}
+
+## aspirin
+cut_aspirin <- round(mean(c(var_imp_cut$aspirin[1], var_imp_cut$aspirin[2])),2)
+cut_aspirin
+
+dsn_final2 <- dsn_final1 %>%
+  mutate(aspirin_bin = as.numeric(round(aspirin>=cut_aspirin)))
+
+
+### aspirin Risk difference
+model_cate_aspirin_rd <- glm(y~tx*aspirin_bin,
+                             family=quasibinomial("identity"),
+                             data=dsn_final2,
+                             weights = sipw_en_all)
+
+tidy(model_cate_aspirin_rd)  %>% 
+  filter(term=="tx:aspirin_bin") %>% 
+  select(term, `p.value`) %>% 
+  round_df(4)# check out the p-value for the interaction term
+p_load("emmeans")
+cate_aspirin_rd <- emmeans::emtrends(model_cate_aspirin_rd, ~aspirin_bin,
+                                     var="tx",
+                                     at = list(aspirin_bin  =c(0,1)),
+                                     vcov = sandwich::vcovCL(model_cate_aspirin_rd,
+                                                             cluster= dsn_final2$id,
+                                                             type="HC1")) %>%
+  tidy(conf.int=T) %>%
+  round_df(2) %>%
+  flextable()
+cate_aspirin_rd
+```
+
+```{r}
+### aspirin Risk ratio
+model_cate_aspirin_rr <- glm(y~tx*aspirin_bin,
+                             family=quasibinomial("log"),
+                             data=dsn_final2,
+                             weights = sipw_en_all)
+
+tidy(model_cate_aspirin_rr) %>% 
+  filter(term=="tx:aspirin_bin") %>% 
+  select(term, `p.value`) %>% 
+  round_df(4)
+
+# check out the p-value for the interaction term
+
+p_load("emmeans")
+cate_aspirin_rr <- emmeans::emtrends(model_cate_aspirin_rr, ~aspirin_bin,
+                                     var="tx",
+                                     at = list(aspirin_bin  =c(0,1)),
+                                     vcov = sandwich::vcovCL(model_cate_aspirin_rr,
+                                                             cluster= dsn_final2$id,
+                                                             type="HC1")) %>%
+  tidy(conf.int=T) %>%
+  mutate_at(c("tx.trend", "conf.low",  "conf.high"), exp) %>%
+  round_df(2) %>%
+  flextable()
+
+cate_aspirin_rr
+```
+
+
+```{r}
+# Number count and proportion
+library(dplyr)
+library(tibble)
+
+
+N_prop_aspirin <- dsn_final2  %>%
+  filter(!is.na(y), !is.na(tx), !is.na(aspirin_bin)) %>%
+  count(aspirin_bin, name = "N") %>%
+  mutate(
+    Proportion = round(100 * N / sum(N), 2)
+  ) %>%
+  arrange(aspirin_bin)
+
+N_prop_aspirin
+
+
+```
+
+
+
+
+
+
+
+# plot Aspirin and eGFR HTE
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+hte_cut <- 0
+
+df_lasso_plot <- df_full %>%
+  mutate(
+    ite_pct = ite * 100,
+    aspirin_f = factor(aspirin, levels = c(0, 1),
+                       labels = c("No Aspirin", "Aspirin"))
+  ) %>%
+  filter(!is.na(aspirin_f), !is.na(ite_pct))
+
+ggplot(df_lasso_plot, aes(x = aspirin_f, y = ite_pct)) +
+  geom_jitter(
+    width = 0.15,
+    height = 0,
+    alpha = 0.55,
+    size = 1.8,
+    color = "#4C72B0"
+  ) +
+  geom_hline(
+    yintercept = hte_cut,
+    linetype = "dashed",
+    linewidth = 1,
+    color = "#D7191C"
+  ) +
+  labs(
+    x = "Baseline Aspirin Use",
+    y = "Estimated HTE (percentage points)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.8),
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(face = "bold"),
+    axis.text  = element_text(color = "black")
+  )
+library(dplyr)
+
+quad_counts <- df_lasso_plot %>%
+  mutate(
+    quad = case_when(
+      aspirin == 0 & ite_pct >= 0 ~ "Q1_left_up",
+      aspirin == 0 & ite_pct <  0 ~ "Q3_left_low",
+      aspirin == 1 & ite_pct >= 0 ~ "Q2_right_up",
+      aspirin == 1 & ite_pct <  0 ~ "Q4_right_low"
+    )
+  ) %>%
+  count(quad)
+quad_counts
+
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+aspirin_bin <- 0.5
+hte_cut   <- 0
+
+df_lasso_plot <- df_full %>%
+  mutate(
+    ite_pct = ite * 100,
+    aspirin_grp = factor(
+      ifelse(aspirin >= 0.5, "Aspirin", "No Aspirin"),
+      levels = c("No Aspirin", "Aspirin")
+    ),
+    quad = case_when(
+      egfr <  cut_egfr & ite_pct >= hte_cut ~ "Q1_left_up",
+      egfr >= cut_egfr & ite_pct >= hte_cut ~ "Q2_right_up",
+      egfr <  cut_egfr & ite_pct <  hte_cut ~ "Q3_left_low",
+      egfr >= cut_egfr & ite_pct <  hte_cut ~ "Q4_right_low"
+    )
+  ) %>%
+  filter(!is.na(egfr), !is.na(ite_pct), !is.na(aspirin_grp))
+quad_cols <- c(
+  "Q1_left_up"  = "#8E87E8",
+  "Q2_right_up" = "#F28E8C",
+  "Q3_left_low" = "#8FD3B6",
+  "Q4_right_low"= "#9AD0EC"
+)
+
+
+ggplot(df_lasso_plot,
+       aes(x = egfr, y = ite_pct,
+           color = quad,
+           shape = factor(aspirin))) +
+  geom_point(alpha = 0.5, size = 1.6) +
+  geom_vline(xintercept = cut_egfr, linetype = "dashed") +
+  geom_hline(yintercept = hte_cut, linetype = "dashed") +
+  scale_color_manual(values = quad_cols, guide = "none") +
+  scale_shape_manual(
+    values = c("0" = 16, "1" = 17),
+    labels = c("No Aspirin", "Aspirin")
+  ) +
+  labs(
+    x = "Baseline eGFR",
+    y = "Estimated HTE (percentage points)",
+    shape = "Aspirin use"
+  ) +
+  theme_bw(base_size = 14)
+
+```
+
+
+```{r}
+# Calculating the number of observations in each quadrant
+quad_N <- df_lasso_plot %>%
+  count(quad)
+quad_N
+```
+
+
+```{r}
+# spearman correlation between eGFR and ITE
+cor_test_ite <- cor.test(
+ df_full$egfr,
+  df_full$ite,
+  method = "spearman"
+)
+
+cor_test_ite
+
+
+```
+
+
+```{r}
+# Spearman correlation between aspirin and ITE
+cor_test_ite <- cor.test(
+ df_full$aspirin,
+  df_full$ite,
+  method = "spearman"
+)
+cor_test_ite
+```

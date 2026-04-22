@@ -1,0 +1,1158 @@
+---
+title: "casual forest simu"
+Author: "Yulin Gong"
+format:
+  html:
+    theme: cosmo
+    embed-resources: true
+    number-sections: false
+    toc: true
+    toc-depth: 4
+    toc-location: left
+    code-fold: false
+---
+
+# Load packages
+
+```{r}
+if (!require("pacman")){
+  install.packages("pacman", repos = 'http://cran.us.r-project.org')
+}
+
+pacman::p_load("glmnet",
+               "tidyverse",
+               "rio",
+               "magrittr",
+               "broom",
+               "labelled",
+               "Hmisc",
+               "flextable",
+               "gtsummary",
+               "emmeans",
+               "here",
+               "cleaR",
+               "fastDummies",
+               "formattable",
+               "glue")
+
+```
+
+```{r}
+cleaR::clear()
+{
+  
+    rmulti = function(prob, n) {
+    as.numeric(rMultinom(probs=matrix(prob, 1, length(prob)), m=n))
+  }
+  
+  expit <- function(linearcombination){
+    n = (1/(1 + exp(-(linearcombination))))
+    return (n)
+  }
+  
+  logit <- function(pr){
+    n = log(pr/(1-pr))
+    return(n)
+  }
+  
+round_df <- function(df, digits) {
+  nums <- vapply(df, is.numeric, FUN.VALUE = logical(1))
+  
+  df[,nums] <- round(df[,nums], digits = digits)
+  (df)
+}
+
+diff_fct <- function(x){
+  dif <- x - lag(x)
+  return(dif)
+}
+
+
+p_load("rlang")
+recreate_var <- function(datau, var_name) {
+  
+  vars <- strsplit(var_name, "__")[[1]]
+  
+  expr <- rlang::parse_expr(paste(vars, collapse = " * "))
+  
+  datau %>% mutate("{var_name}" := !!expr)
+}
+
+geom_hist_percent <- function(.data, .var) {
+  .data %>%
+    ggplot(aes(x = !!sym(.var))) +
+    geom_histogram(aes(y = after_stat(count/sum(count)))) +
+    ylab("Percent") +
+    scale_y_continuous(labels = scales::percent) +
+    theme_bw()
+}
+
+
+}
+```
+
+
+```{r}
+n=10000
+set.seed(123)
+
+data_grf <- tibble(
+  age   = rnorm(n, mean=68, sd=10), 
+  black = rbinom(n, size=1, prob=0.3), 
+  sbp   = rnorm(n, mean=140, sd=15), 
+  dbp   = rnorm(n, mean=78, sd=12), 
+  scr   = rnorm(n, mean=1.07, sd=0.34), 
+  egfr  = rnorm(n, mean=72, sd=20), 
+  egfr_ge72 = as.numeric(egfr>=72),
+  statin=rbinom(n, size=1, prob=0.43), 
+  aspirin=rbinom(n, size=1, prob=0.51), 
+  fram  = rnorm(n, mean=25, sd=12), 
+  smok  = factor(rmulti(prob=c(0.44, 0.42, 0.14), n))) %>% 
+  dummy_cols("smok", remove_selected_columns = F,
+             remove_first_dummy = T) %>% 
+  mutate(
+    tx = rbinom(n, size=1, prob=expit(logit(0.01) + 
+                                        log(0.90)*statin+
+                                        log(1.01)*sbp+
+                                        log(1.01)*dbp+
+                                        log(1.01)*age+
+                                        log(1.03)*fram+
+                                        log(1.1)*black+
+                                        log(1.1)*scr+
+                                        log(1.1)*smok_3 +
+                                        log(1.05)*smok_2)),
+    
+    y = rbinom(n, size=1, prob=expit(logit(0.01) + 
+                                       log(0.038)*tx + 
+                                       log(0.592)*egfr_ge72 +
+                                       log(0.453)*aspirin +
+                                       log(12.00)*tx*egfr_ge72 + 
+                                       log(34.70)*tx*aspirin +
+                                       log(0.543)*egfr_ge72*aspirin + 
+                                       log(0.372)*tx*egfr_ge72*aspirin +
+                                       
+                                       log(0.90)*statin+
+                                       log(1.01)*sbp+
+                                       log(1.01)*dbp+
+                                       log(1.01)*age+
+                                       log(1.03)*fram+
+                                       log(1.1)*black+
+                                       log(1.2)*scr+
+                                       log(1.05)*smok_3 +
+                                       log(1.05)*smok_2))) %>% 
+  set_variable_labels(egfr    = "Estimated Glomerular Filtration Rate",
+                      aspirin = "Aspirin use",
+                      statin  = "Statin use",
+                      sbp     = "Systolic blood pressure",
+                      dbp     = "Diastolic blood pressure",
+                      age     = "Age in years",
+                      fram    = "Framingham score risk",
+                      black   = "Black race",
+                      scr     = "Serum Creatinine",
+                      smok_3  = "Current smoker", #smok_1: "Smoking (never)"
+                      smok_2  = "Fomer smoker") 
+```
+
+
+
+```{r}
+
+library(haven)
+library(labelled)
+
+
+
+ 
+
+table1 <- data_grf %>% 
+  mutate(tx = case_when(tx==1~"Treatment",
+                        TRUE~"Placebo")) %>%
+   mutate(`Smoking status` = as.numeric(as_factor(smok))) %>%
+  dplyr::select(-contains("smok_"), -egfr_ge72, -smok) %>%
+  relocate(y, .after = "Smoking status") %>%
+  rename(`Y (cardiovascular events)` = y) %>%
+  set_value_labels(`Smoking status` = c("Never smoker" = 1,
+                            "Former smoker" = 2,
+                            "Current smoker" =3)) %>%
+  modify_if(is.labelled, to_factor) %>%
+  tbl_summary(missing = "no",
+              by="tx",
+              digits = list(everything() ~ 0),
+              statistic = list(all_continuous()  ~"{mean} ({sd})",
+                               all_categorical() ~ "{n} ({p}%)")) %>%
+  add_overall() %>%
+  add_stat_label(location = "row") %>%
+  modify_header(label = "**Variable**") %>%
+  modify_spanning_header(starts_with("stat_") ~ "Treatment Assignment") %>%
+  bold_labels()
+
+
+table1
+```
+
+```{r}
+library(tidyverse)
+library(labelled)
+
+final_data <- data_grf %>% 
+  mutate(tx = case_when(tx == 1 ~ "Treatment",
+                        TRUE ~ "Placebo")) %>%
+  
+  mutate(`Smoking status` = as_factor(smok)) %>%
+  dplyr::select(-contains("smok_"), -egfr_ge72, -smok) %>%
+  relocate(y, .after = `Smoking status`) %>%
+  rename(`Y (cardiovascular events)` = y) %>%
+  set_variable_labels(
+    age     = "Age in years",
+    black   = "Black race",
+    sbp     = "Systolic blood pressure",
+    dbp     = "Diastolic blood pressure",
+    scr     = "Serum Creatinine",
+    egfr    = "Estimated Glomerular Filtration Rate",
+    statin  = "Statin use",
+    aspirin = "Aspirin use",
+    fram    = "Framingham score risk",
+    `Smoking status` = "Smoking status",
+    `Y (cardiovascular events)` = "Y (cardiovascular events)",
+    tx      = "Treatment Assignment"
+  )%>% 
+  mutate(across(c(black, statin, aspirin, `Y (cardiovascular events)`), 
+                ~factor(.x, levels = c(0,1), labels = c("No","Yes")))) %>%
+
+  mutate(tx = factor(tx, levels = c("Placebo", "Treatment")))
+
+
+
+glimpse(final_data)
+
+```
+
+
+# Causal Forest part
+
+
+```{r}
+options(repos = c(CRAN = "https://cloud.r-project.org/"))
+library(grf)
+library(tidyverse)
+# covert data to numeric
+cf_data <- final_data %>% 
+  mutate(
+    tx = ifelse(tx == "Treatment", 1, 0),
+    black = ifelse(black == "Yes", 1, 0),
+    statin = ifelse(statin == "Yes", 1, 0),
+    aspirin = ifelse(aspirin == "Yes", 1, 0),
+    `Smoking status` = as.numeric(`Smoking status`), 
+    y = ifelse(`Y (cardiovascular events)` == "Yes", 1, 0)
+  ) %>% 
+  select(-`Y (cardiovascular events)`)
+
+
+```
+
+
+## casual forest model
+```{r}
+set.seed(123)
+
+Y <- cf_data$y
+W <- cf_data$tx
+X <- cf_data %>% select(-y, -tx)
+
+cf_model <- causal_forest(X, Y, W)
+
+```
+
+
+## predict cate
+
+```{r}
+tau.hat <- predict(cf_model)$predictions
+cf_data$tau.hat <- tau.hat
+cf_data$tau.hat_pct <- tau.hat * 100
+
+```
+
+
+## ITE distribution
+```{r}
+
+geom_hist_percent <- function(.data, .var) {
+  .data %>%
+    ggplot(aes(x = !!sym(.var))) +
+    geom_histogram(aes(y = after_stat(count/sum(count)))) +
+    ylab("Percent") +
+    scale_y_continuous(labels = scales::percent) +
+    theme_bw()
+}
+cf_data %>%
+  geom_hist_percent("tau.hat") +
+  labs(x="Individualized treatement effects (ITE)") 
+```
+
+
+
+## plot Aspirin, eGFR and HTE
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+hte_cut <- 0
+
+df_cf_plot <- cf_data %>%
+  mutate(
+    ite_pct = tau.hat * 100,
+    aspirin_f = factor(aspirin, levels = c(0, 1),
+                       labels = c("No Aspirin", "Aspirin"))
+  ) %>%
+  filter(!is.na(aspirin_f), !is.na(ite_pct))
+
+ggplot(df_cf_plot, aes(x = aspirin_f, y = ite_pct)) +
+  geom_jitter(
+    width = 0.15,
+    height = 0,
+    alpha = 0.55,
+    size = 1.8,
+    color = "#4C72B0"
+  ) +
+  geom_hline(
+    yintercept = hte_cut,
+    linetype = "dashed",
+    linewidth = 1,
+    color = "#D7191C"
+  ) +
+  labs(
+    x = "Baseline Aspirin Use",
+    y = "Estimated HTE (percentage points)"
+  ) +
+  theme_bw(base_size = 14) +
+  theme(
+    panel.background = element_rect(fill = "white"),
+    panel.grid.major = element_line(color = "grey92", linewidth = 0.8),
+    panel.grid.minor = element_blank(),
+    axis.title = element_text(face = "bold"),
+    axis.text  = element_text(color = "black")
+  )
+library(dplyr)
+# count numbers in each observation
+quad_counts <- df_cf_plot %>%
+  mutate(
+    quad = case_when(
+      aspirin == 0 & ite_pct >= 0 ~ "Q1_left_up",
+      aspirin == 0 & ite_pct <  0 ~ "Q3_left_low",
+      aspirin == 1 & ite_pct >= 0 ~ "Q2_right_up",
+      aspirin == 1 & ite_pct <  0 ~ "Q4_right_low"
+    )
+  ) %>%
+  count(quad)
+quad_counts
+
+cor_test_ite <- cor.test(
+ cf_data$aspirin,
+  cf_data$tau.hat_pct,
+  method = "spearman"
+)
+
+cor_test_ite
+```
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+
+cut_egfr <- 72
+aspirin_bin <- 0.5
+hte_cut   <- 0
+
+df_cf2_plot <- cf_data %>%
+  mutate(
+    ite_pct = tau.hat * 100,
+    aspirin_grp = factor(
+      ifelse(aspirin >= 0.5, "Aspirin", "No Aspirin"),
+      levels = c("No Aspirin", "Aspirin")
+    ),
+    quad = case_when(
+      egfr <  cut_egfr & ite_pct >= hte_cut ~ "Q1_left_up",
+      egfr >= cut_egfr & ite_pct >= hte_cut ~ "Q2_right_up",
+      egfr <  cut_egfr & ite_pct <  hte_cut ~ "Q3_left_low",
+      egfr >= cut_egfr & ite_pct <  hte_cut ~ "Q4_right_low"
+    )
+  ) %>%
+  filter(!is.na(egfr), !is.na(ite_pct), !is.na(aspirin_grp))
+
+quad_cols <- c(
+  "Q1_left_up"  = "#8E87E8",
+  "Q2_right_up" = "#F28E8C",
+  "Q3_left_low" = "#8FD3B6",
+  "Q4_right_low"= "#9AD0EC"
+)
+
+
+ggplot(df_cf2_plot,
+       aes(x = egfr, y = ite_pct,
+           color = quad,
+           shape = factor(aspirin))) +
+  geom_point(alpha = 0.5, size = 1.6) +
+  geom_vline(xintercept = cut_egfr, linetype = "dashed") +
+  geom_hline(yintercept = hte_cut, linetype = "dashed") +
+  scale_color_manual(values = quad_cols, guide = "none") +
+  scale_shape_manual(
+    values = c("0" = 16, "1" = 17),
+    labels = c("No Aspirin", "Aspirin")
+  ) +
+  labs(
+    x = "Baseline eGFR",
+    y = "Estimated HTE (percentage points)",
+    shape = "Aspirin use"
+  ) +
+  theme_bw(base_size = 14)
+
+# count number
+quad_N <- df_cf2_plot %>%
+  count(quad)
+quad_N
+
+cor_test_ite <- cor.test(
+ cf_data$egfr,
+  cf_data$tau.hat_pct,
+  method = "spearman"
+)
+
+cor_test_ite
+
+
+```
+
+## Variable importance within causal forest
+
+```{r}
+vi <- variable_importance(cf_model)
+
+vi_df <- tibble(
+  variable = colnames(X),
+  importance = vi
+) %>%
+  arrange(desc(importance)) %>%
+  mutate(abs_coef = importance)   #
+
+
+var_labels <- c(
+  aspirin        = "Aspirin use",
+  egfr           = "Estimated glomerular filtration rate (eGFR)",
+  fram    = "Framingham risk score",
+  statin         = "Statin use",
+  scr     = "Serum creatinine",
+  black          = "Black race",
+  age            = "Age in years",
+  dbp            = "Diastolic blood pressure",
+  sbp = "Systolic blood pressure",
+  former_smoker  = "Former smoker"
+)
+
+
+library(ggplot2)
+
+ggplot(vi_df, aes(
+  x = abs_coef,
+  y = reorder(variable, abs_coef)
+)) +
+  geom_col(fill = "#377EB8") +   
+  scale_x_continuous(
+    breaks = seq(0, max(vi_df$abs_coef), 0.1),
+    limits = c(0, max(vi_df$abs_coef))
+  ) +
+  scale_y_discrete(labels = var_labels) +
+  labs(
+    x = "Variable importance",
+    y = "Predictors",
+    title = "Variable importance from Causal Forest"
+  ) +
+  geom_vline(xintercept = 0.2, linetype = 2, linewidth = 1) +
+  theme_bw(base_size = 10) +
+  theme(
+    axis.title.x = element_text(face = "bold"),
+    axis.text.y = element_text(face = "bold")
+  )
+
+
+```
+
+```{r}
+
+library(rpart)
+library(rpart.plot)
+
+# Prepare dataset (exclude outcome, treatment, and redundant variables)
+df_cart <- cf_data %>%
+  select(-y, -tx, -tau.hat_pct, -tau.hat)
+
+# Fit CART model using estimated treatment effects as outcome
+cart_model <- rpart(
+  tau.hat_pct ~ .,   # predict HTE (percentage scale)
+  data = cbind(tau.hat_pct = cf_data$tau.hat_pct, df_cart),
+  control = rpart.control(
+    maxdepth = 2,    # limit tree depth for interpretability
+    minbucket = 200  # minimum observations per terminal node
+  )
+)
+
+# Plot tree to visualize subgroup cutoffs
+rpart_cutoff <- rpart.plot(
+  cart_model,
+  type = 2,
+  extra = 101,
+  digits = 3,
+  box.palette = "RdBu",
+  shadow.col = "gray",
+  cex = 0.8
+)
+
+
+
+```
+
+
+
+
+
+```{r}
+# spearman correlation
+cor_test <- cor.test(cf_data$egfr, cf_data$tau.hat_pct, method = "spearman")
+cor_test
+
+```
+
+```{r}
+
+# Estimate ATE from Causal Forest Predictions
+# Compute ATE as the mean of individual treatment effects (tau.hat)
+ate_rd_est <- mean(tau.hat)
+
+# Convert ATE to percentage points
+ate_rd_est_pct <- 100 * ate_rd_est
+
+
+ate_rd_est
+ate_rd_est_pct
+
+# Estimate ATE using GRF built-in function
+ate_obj <- average_treatment_effect(cf_model, target.sample = "all")
+
+# Handle different output formats (list vs numeric with attributes)
+if (is.list(ate_obj)) {
+  ate_se <- ate_obj$std.err        # standard error
+  ate_est_check <- ate_obj$estimate
+} else {
+  ate_se <- attr(ate_obj, "std.err")
+  ate_est_check <- as.numeric(ate_obj)
+}
+
+# Compare ATE from tau.hat vs GRF function
+c(mean_tau = ate_rd_est, ate_from_grf = ate_est_check)
+
+
+ate_rd_ci <- ate_rd_est + c(-1, 1) * 1.96 * ate_se
+
+
+ate_rd_ci_pct <- 100 * ate_rd_ci
+
+ate_rd_est_pct
+ate_rd_ci_pct
+
+```
+
+```{r}
+
+# Fit separate regression forests for treated and control groups
+rf1 <- regression_forest(X[W == 1, , drop = FALSE], Y[W == 1])
+rf0 <- regression_forest(X[W == 0, , drop = FALSE], Y[W == 0])
+
+# Predict potential outcomes for all individuals
+p1_hat <- predict(rf1, X)$predictions   # predicted Y(1)
+p0_hat <- predict(rf0, X)$predictions   # predicted Y(0)
+
+# Compute marginal risks
+P1 <- mean(p1_hat)   # E[Y(1)]
+P0 <- mean(p0_hat)   # E[Y(0)]
+
+# Compute risk ratio
+rr_est <- P1 / P0
+rr_est
+```
+
+```{r}
+# Confidence Interval for Risk Ratio (RR)
+# Sample size
+n <- length(Y)
+
+# Variance of estimated marginal risks
+var_P1 <- var(p1_hat) / n   # variance of E[Y(1)]
+var_P0 <- var(p0_hat) / n   # variance of E[Y(0)]
+
+# Delta method: standard error on log scale
+se_log_rr <- sqrt(var_P1 / (P1^2) + var_P0 / (P0^2))
+
+# Construct 95% CI for RR (log scale → exponentiate)
+rr_ci <- exp(log(rr_est) + c(-1, 1) * 1.96 * se_log_rr)
+
+# Output RR estimate and confidence interval
+rr_est
+rr_ci
+
+```
+
+
+
+## Interaction
+```{r}
+df_int <- cf_data %>%
+  mutate(
+    group = case_when(
+      aspirin == 0  & egfr < 71.3  ~ "G1",
+      aspirin == 0  & egfr >= 71.3 ~ "G2",
+      aspirin == 1 & egfr < 71.8 ~ "G3",
+      aspirin == 1 & egfr >= 71.8 ~ "G4",
+      TRUE ~ NA_character_
+    ),
+    group = factor(group, levels = c("G1","G2","G3","G4"))
+  ) %>%
+  filter(!is.na(group))
+
+table(df_int$group)  
+m0 <- glm(y ~ tx + group,
+          data = df_int, family = binomial())
+
+m1 <- glm(y ~ tx * group,
+          data = df_int, family = binomial())
+
+anova(m0, m1, test = "LRT")
+library(emmeans)
+
+
+eff_within <- emmeans(m1, ~ tx | group) %>%
+  contrast(method = "revpairwise")   # treat1 - treat0
+
+eff_within
+emmeans(m1, ~ tx * group) %>%
+  contrast(
+    interaction = "pairwise",
+    by = NULL
+  )
+
+
+```
+
+
+
+# step 2 categorical subgroup
+
+```{r}
+library(dplyr)
+
+df_sub <- cf_data %>%
+  mutate(
+    ## Age: 2 groups: <60 / ≥60
+    Age_cat = factor(if_else(age < 60, "<60", "≥60"),
+                     levels = c("<60", "≥60")),
+
+  
+    ## Systolic BP (sbp_mean):  <120, 120–129.9, 130–139.9, 140–159.9, 160–179.9, ≥180
+    SBP_cat = cut(
+      sbp,
+      breaks = c(-Inf, 120, 130, 140, 160, 180, Inf),
+      labels = c("<120", "120–129.9", "130–139.9",
+                 "140–159.9", "160–179.9", "≥180"),
+      right = FALSE
+    ),
+    ## dbp:  <80, 80–89.9, ≥90
+    DBP_cat = cut(
+       dbp,
+       breaks = c(-Inf, 80, 90, Inf),
+       labels = c("<80", "80–89.9", "≥90"),
+       right = FALSE
+    ),
+    
+    # egfr: <15, 15–29.9, 30–44.9, 45–59.9, 60–89.9, ≥90
+    egfr_cat = cut(
+     egfr,
+     breaks = c(-Inf, 15, 30, 45, 60, 90, Inf),
+     labels = c("<15", "15–29.9", "30–44.9", "45–59.9", "60–89.9", "≥90"),
+    right = FALSE
+   ),
+    ## framingham risk score: <10%, 10–19.9%, 20–29.9%, ≥30%
+    fram_cat = cut(
+      fram,
+      breaks = c(-Inf, 10, 20, 30, Inf),
+      labels = c("<10%", "10–19.9%", "20–29.9%", "≥30%"),
+      right = FALSE
+    ),
+    
+    scr_cat = factor(ifelse(scr >= 1.2, "≥1.2", "<1.2"))
+  )
+
+    
+vars <- c("age","sbp","dbp","scr", "egfr","fram")
+df_sub <- df_sub %>% select(-all_of(vars))
+
+```
+
+
+```{r}
+data.cart <- df_sub %>%
+  select(
+   -y, -tx, -tau.hat_pct, -tau.hat)
+
+
+```
+
+```{r}
+data.cart <- cbind(
+  tau.hat_pct = df_sub$tau.hat_pct,
+  data.cart
+)
+library(rpart)
+
+cart_model <- rpart(
+  tau.hat_pct ~ .,
+  data = data.cart,
+  control = rpart.control(maxdepth = 2, minbucket = 300)
+)
+
+library(rpart.plot)
+
+rpart.plot(
+  cart_model,
+  type = 2,
+  extra = 101,
+  digits = 3,
+  box.palette = "RdBu",
+  shadow.col = "gray",
+  cex = 0.75
+)
+
+```
+
+```{r}
+
+      
+      
+      
+g1 <- with(cf_data, aspirin == 0  & egfr < 59.9)             
+g2 <- with(cf_data, aspirin == 0  & egfr >= 59.9)           
+g3 <- with(cf_data, aspirin == 1 & egfr < 59.9)           
+g4 <- with(cf_data, aspirin == 1 & egfr >= 59.9)         
+library(grf)
+library(dplyr)
+
+subgroup_cf <- function(cf_model, subset_idx) {
+  ate <- average_treatment_effect(
+    cf_model,
+    subset        = subset_idx,
+    method        = "AIPW",
+    target.sample = "all"
+  )
+  
+  est <- ate[["estimate"]]
+  se  <- ate[["std.err"]]
+  
+  tibble(
+    tau      = est,
+    se       = se,
+    lwr      = est - 1.96 * se,
+    upr      = est + 1.96 * se,
+    p_value  = 2 * pnorm(-abs(est / se)),
+    n        = sum(subset_idx)
+  )
+}
+
+res_step3 <- bind_rows(
+  G1 = subgroup_cf(cf_model, g1),
+  G2 = subgroup_cf(cf_model, g2),
+  G3 = subgroup_cf(cf_model, g3),
+  G4 = subgroup_cf(cf_model, g4),
+  .id = "group"
+) %>%
+
+  mutate(
+    tau = tau * 100,
+    se  = se  * 100,
+    lwr = lwr * 100,
+    upr = upr * 100
+  )
+
+
+res_step3 <- res_step3 %>%
+  mutate(
+    tau = round(tau, 2),
+    se  = round(se, 2),
+    lwr = round(lwr, 2),
+    upr = round(upr, 2),
+    p_value = round(p_value, 3)   
+  )
+flextable(res_step3)
+
+
+```
+
+
+## summary table preparation
+
+
+
+```{r}
+library(dplyr)
+library(tibble)
+library(grf)
+
+cutoff_egfr <- 60
+
+# resubgroup based on catergorical cut off points
+df_int <- cf_data %>%
+  mutate(
+    group4 = case_when(
+      aspirin == 0 & egfr <  cutoff_egfr ~ paste0("G1: No aspirin & eGFR<", cutoff_egfr),
+      aspirin == 0 & egfr >= cutoff_egfr ~ paste0("G2: No aspirin & eGFR>=", cutoff_egfr),
+      aspirin == 1 & egfr <  cutoff_egfr ~ paste0("G3: Aspirin & eGFR<", cutoff_egfr),
+      aspirin == 1 & egfr >= cutoff_egfr ~ paste0("G4: Aspirin & eGFR>=", cutoff_egfr),
+      TRUE ~ NA_character_
+    ),
+    group4 = factor(
+      group4,
+      levels = c(
+        paste0("G1: No aspirin & eGFR<", cutoff_egfr),
+        paste0("G2: No aspirin & eGFR>=", cutoff_egfr),
+        paste0("G3: Aspirin & eGFR<", cutoff_egfr),
+        paste0("G4: Aspirin & eGFR>=", cutoff_egfr)
+      )
+    ),
+    idx = row_number()
+  ) %>%
+  filter(!is.na(group4))
+
+table(df_int$group4)
+
+# check the subgroups
+stopifnot(all(c("idx", "group4") %in% names(df_int)))
+stopifnot(length(Y) >= max(df_int$idx))
+stopifnot(length(W) >= max(df_int$idx))
+stopifnot(nrow(X) >= max(df_int$idx))
+
+n_total_train <- length(Y)
+
+# subgroup labels
+g1_label <- paste0("G1: No aspirin & eGFR<", cutoff_egfr)
+g2_label <- paste0("G2: No aspirin & eGFR>=", cutoff_egfr)
+g3_label <- paste0("G3: Aspirin & eGFR<", cutoff_egfr)
+g4_label <- paste0("G4: Aspirin & eGFR>=", cutoff_egfr)
+
+
+# RD: subgroup AIPW estimate from causal forest
+
+subgroup_rd <- function(cf_model, subset_idx, n_total) {
+  
+  subset_idx <- subset_idx[!is.na(subset_idx)]
+  
+  if (length(subset_idx) == 0) {
+    return(tibble(
+      RD = NA_real_,
+      RD_se = NA_real_,
+      RD_lwr = NA_real_,
+      RD_upr = NA_real_,
+      P_effect_RD = NA_real_
+    ))
+  }
+  
+  subset_full <- rep(FALSE, n_total)
+  subset_full[subset_idx] <- TRUE
+  
+  ate <- tryCatch(
+    average_treatment_effect(
+      cf_model,
+      subset = subset_full,
+      method = "AIPW",
+      target.sample = "all"
+    ),
+    error = function(e) NULL
+  )
+  
+  if (is.null(ate)) {
+    return(tibble(
+      RD = NA_real_,
+      RD_se = NA_real_,
+      RD_lwr = NA_real_,
+      RD_upr = NA_real_,
+      P_effect_RD = NA_real_
+    ))
+  }
+  
+  est <- ate[["estimate"]] * 100
+  se  <- ate[["std.err"]] * 100
+  
+  tibble(
+    RD = est,
+    RD_se = se,
+    RD_lwr = est - 1.96 * se,
+    RD_upr = est + 1.96 * se,
+    P_effect_RD = 2 * pnorm(-abs(est / se))
+  )
+}
+
+
+#  RR: AIPW pseudo-outcome approach
+
+rf1 <- regression_forest(X[W == 1, , drop = FALSE], Y[W == 1])
+rf0 <- regression_forest(X[W == 0, , drop = FALSE], Y[W == 0])
+
+m1_hat <- as.numeric(predict(rf1, X)$predictions)
+m0_hat <- as.numeric(predict(rf0, X)$predictions)
+
+eps  <- 1e-3
+ehat <- pmin(pmax(cf_model$W.hat, eps), 1 - eps)
+
+subgroup_rr <- function(subset_idx) {
+  
+  subset_idx <- subset_idx[!is.na(subset_idx)]
+  
+  if (length(subset_idx) == 0) {
+    return(tibble(
+      RR = NA_real_, RR_lwr = NA_real_, RR_upr = NA_real_,
+      logRR = NA_real_, se_logRR = NA_real_, P_effect_RR = NA_real_
+    ))
+  }
+  
+  Yi <- Y[subset_idx]
+  Wi <- W[subset_idx]
+  ei <- ehat[subset_idx]
+  m1 <- m1_hat[subset_idx]
+  m0 <- m0_hat[subset_idx]
+  
+  phi1 <- m1 + Wi * (Yi - m1) / ei
+  phi0 <- m0 + (1 - Wi) * (Yi - m0) / (1 - ei)
+  
+  if (anyNA(phi1) || anyNA(phi0)) {
+    return(tibble(
+      RR = NA_real_, RR_lwr = NA_real_, RR_upr = NA_real_,
+      logRR = NA_real_, se_logRR = NA_real_, P_effect_RR = NA_real_
+    ))
+  }
+  
+  mu1 <- mean(phi1)
+  mu0 <- mean(phi0)
+  
+  if (!is.finite(mu1) || !is.finite(mu0) || mu0 <= 0 || mu1 <= 0) {
+    return(tibble(
+      RR = NA_real_, RR_lwr = NA_real_, RR_upr = NA_real_,
+      logRR = NA_real_, se_logRR = NA_real_, P_effect_RR = NA_real_
+    ))
+  }
+  
+  IF1 <- phi1 - mu1
+  IF0 <- phi0 - mu0
+  
+  cov10 <- cov(IF1, IF0) / length(subset_idx)
+  se1 <- sd(IF1) / sqrt(length(subset_idx))
+  se0 <- sd(IF0) / sqrt(length(subset_idx))
+  
+  var_logrr <- (se1^2) / (mu1^2) + (se0^2) / (mu0^2) - 2 * cov10 / (mu1 * mu0)
+  se_logrr  <- sqrt(pmax(var_logrr, 0))
+  
+  rr <- mu1 / mu0
+  logrr <- log(rr)
+  
+  tibble(
+    RR = rr,
+    RR_lwr = exp(logrr - 1.96 * se_logrr),
+    RR_upr = exp(logrr + 1.96 * se_logrr),
+    logRR = logrr,
+    se_logRR = se_logrr,
+    P_effect_RR = 2 * pnorm(-abs(logrr / se_logrr))
+  )
+}
+
+
+#  P_diff functions
+
+p_diff_rd <- function(estA, seA, estB, seB) {
+  if (any(is.na(c(estA, seA, estB, seB)))) return(NA_real_)
+  z <- (estA - estB) / sqrt(seA^2 + seB^2)
+  2 * pnorm(-abs(z))
+}
+
+p_diff_logrr <- function(logA, seA, logB, seB) {
+  if (any(is.na(c(logA, seA, logB, seB)))) return(NA_real_)
+  z <- (logA - logB) / sqrt(seA^2 + seB^2)
+  2 * pnorm(-abs(z))
+}
+
+
+subsets <- list(
+  "N1: No aspirin parent" = df_int %>%
+    filter(group4 %in% c(g1_label, g2_label)) %>%
+    pull(idx),
+  
+  "N2: Aspirin parent" = df_int %>%
+    filter(group4 %in% c(g3_label, g4_label)) %>%
+    pull(idx),
+  
+  "G1: No aspirin & eGFR<60" = df_int %>%
+    filter(group4 == g1_label) %>%
+    pull(idx),
+  
+  "G2: No aspirin & eGFR>=60" = df_int %>%
+    filter(group4 == g2_label) %>%
+    pull(idx),
+  
+  "G3: Aspirin & eGFR<60" = df_int %>%
+    filter(group4 == g3_label) %>%
+    pull(idx),
+  
+  "G4: Aspirin & eGFR>=60" = df_int %>%
+    filter(group4 == g4_label) %>%
+    pull(idx)
+)
+
+sapply(subsets, length)
+
+
+#  RD / RR
+
+tab4_raw <- lapply(names(subsets), function(nm) {
+  
+  idx <- subsets[[nm]]
+  
+  rd <- subgroup_rd(cf_model, idx, n_total_train)
+  rr <- subgroup_rr(idx)
+  
+  tibble(
+    subgroup = nm,
+    N = length(idx),
+    Proportion = 100 * length(idx) / nrow(df_int),
+    
+    RD = rd$RD,
+    RD_se = rd$RD_se,
+    RD_lwr = rd$RD_lwr,
+    RD_upr = rd$RD_upr,
+    P_effect_RD = rd$P_effect_RD,
+    
+    RR = rr$RR,
+    RR_lwr = rr$RR_lwr,
+    RR_upr = rr$RR_upr,
+    logRR = rr$logRR,
+    se_logRR = rr$se_logRR,
+    P_effect_RR = rr$P_effect_RR
+  )
+}) %>% bind_rows()
+
+tab4_raw
+
+
+# P_diff
+
+get <- function(x) tab4_raw %>% filter(subgroup == x)
+
+Pdiff_top_RD <- p_diff_rd(
+  get("N1: No aspirin parent")$RD,
+  get("N1: No aspirin parent")$RD_se,
+  get("N2: Aspirin parent")$RD,
+  get("N2: Aspirin parent")$RD_se
+)
+
+Pdiff_left_RD <- p_diff_rd(
+  get("G1: No aspirin & eGFR<60")$RD,
+  get("G1: No aspirin & eGFR<60")$RD_se,
+  get("G2: No aspirin & eGFR>=60")$RD,
+  get("G2: No aspirin & eGFR>=60")$RD_se
+)
+
+Pdiff_right_RD <- p_diff_rd(
+  get("G3: Aspirin & eGFR<60")$RD,
+  get("G3: Aspirin & eGFR<60")$RD_se,
+  get("G4: Aspirin & eGFR>=60")$RD,
+  get("G4: Aspirin & eGFR>=60")$RD_se
+)
+
+Pdiff_top_RR <- p_diff_logrr(
+  get("N1: No aspirin parent")$logRR,
+  get("N1: No aspirin parent")$se_logRR,
+  get("N2: Aspirin parent")$logRR,
+  get("N2: Aspirin parent")$se_logRR
+)
+
+Pdiff_left_RR <- p_diff_logrr(
+  get("G1: No aspirin & eGFR<60")$logRR,
+  get("G1: No aspirin & eGFR<60")$se_logRR,
+  get("G2: No aspirin & eGFR>=60")$logRR,
+  get("G2: No aspirin & eGFR>=60")$se_logRR
+)
+
+Pdiff_right_RR <- p_diff_logrr(
+  get("G3: Aspirin & eGFR<60")$logRR,
+  get("G3: Aspirin & eGFR<60")$se_logRR,
+  get("G4: Aspirin & eGFR>=60")$logRR,
+  get("G4: Aspirin & eGFR>=60")$se_logRR
+)
+
+
+# summary  tab4
+
+tab4 <- tab4_raw %>%
+  mutate(
+    P_diff_RD = case_when(
+      grepl("^N1|^N2", subgroup) ~ Pdiff_top_RD,
+      subgroup %in% c("G1: No aspirin & eGFR<60", "G2: No aspirin & eGFR>=60") ~ Pdiff_left_RD,
+      subgroup %in% c("G3: Aspirin & eGFR<60", "G4: Aspirin & eGFR>=60") ~ Pdiff_right_RD
+    ),
+    P_diff_RR = case_when(
+      grepl("^N1|^N2", subgroup) ~ Pdiff_top_RR,
+      subgroup %in% c("G1: No aspirin & eGFR<60", "G2: No aspirin & eGFR>=60") ~ Pdiff_left_RR,
+      subgroup %in% c("G3: Aspirin & eGFR<60", "G4: Aspirin & eGFR>=60") ~ Pdiff_right_RR
+    ),
+    
+    RD = ifelse(
+      is.na(RD),
+      "NA (NA, NA)",
+      sprintf("%.2f (%.2f, %.2f)", RD, RD_lwr, RD_upr)
+    ),
+    RR = ifelse(
+      is.na(RR),
+      "NA (NA, NA)",
+      sprintf("%.2f (%.2f, %.2f)", RR, RR_lwr, RR_upr)
+    ),
+    Proportion = sprintf("%.2f", Proportion),
+    
+    P_effect_RD = ifelse(
+      is.na(P_effect_RD),
+      NA_character_,
+      ifelse(P_effect_RD < 0.001, "<0.001", sprintf("%.3f", P_effect_RD))
+    ),
+    P_effect_RR = ifelse(
+      is.na(P_effect_RR),
+      NA_character_,
+      ifelse(P_effect_RR < 0.001, "<0.001", sprintf("%.3f", P_effect_RR))
+    ),
+    P_diff_RD = ifelse(
+      is.na(P_diff_RD),
+      NA_character_,
+      ifelse(P_diff_RD < 0.001, "<0.001", sprintf("%.3f", P_diff_RD))
+    ),
+    P_diff_RR = ifelse(
+      is.na(P_diff_RR),
+      NA_character_,
+      ifelse(P_diff_RR < 0.001, "<0.001", sprintf("%.3f", P_diff_RR))
+    )
+  ) %>%
+  select(
+    subgroup, N, Proportion,
+    RD, P_effect_RD, P_diff_RD,
+    RR, P_effect_RR, P_diff_RR
+  )
+```
+
+## summary table
+```{r}
+flextable(tab4)
+```
+
+
