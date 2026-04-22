@@ -34,7 +34,7 @@ The main objectives of this project are:
 
 The following directed acyclic graph (DAG) illustrates the assumed relationships among baseline covariates, treatment assignment, outcome, and key effect modifiers used in this project.
 
-![Conceptual DAG](figures/dag.png)
+![Conceptual DAG](figure/dag.png)
 
 **Figure 1.** Conceptual framework for heterogeneous treatment effect analysis. Baseline covariates such as age, blood pressure, smoking status, Framingham risk score, serum creatinine, statin use, and Black race may influence treatment assignment and cardiovascular outcome. Estimated glomerular filtration rate (eGFR) and aspirin use are modeled as key effect modifiers through treatment interaction terms.
 
