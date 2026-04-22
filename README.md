@@ -124,5 +124,5 @@ A simplified workflow for this project is:
 
 ```text
 ├── script/               # R scripts for simulation, modeling, and plotting
-├── figure/               # figures used in README and manuscript
+├── figure/               # figures used in README 
 └── README.md
