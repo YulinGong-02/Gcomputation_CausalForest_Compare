@@ -123,6 +123,6 @@ A simplified workflow for this project is:
 ## Repository structure
 
 ```text
-├── scripts/               # R scripts for simulation, modeling, and plotting
-├── figures/               # figures used in README and manuscript
+├── script/               # R scripts for simulation, modeling, and plotting
+├── figure/               # figures used in README and manuscript
 └── README.md
